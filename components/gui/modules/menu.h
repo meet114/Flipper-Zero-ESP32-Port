@@ -72,15 +72,15 @@ void menu_set_selected_item(Menu* menu, uint32_t index);
  *  @note  Mirrors Momentum-Firmware menu styles (List/Dsi/Wii).
  */
 typedef enum {
-    MenuStyleList,
-    MenuStyleWii,
-    MenuStyleDsi,
-    MenuStylePs4,
-    MenuStyleVertical,
-    MenuStyleC64,
-    MenuStyleCompact,
-    MenuStyleMNTM,
-    MenuStyleCoverFlow,
+    MenuStyleList, // default vertical list
+    MenuStyleWii, // Nintendo Wii Channel grid
+    MenuStyleDsi, // Nintendo DSi home menu
+    MenuStylePs4, // PS4-style horizontal bar
+    MenuStyleVertical, // rotated vertical list
+    MenuStyleC64, // Commodore 64 BASIC listing
+    MenuStyleCompact, // dense two-column list
+    MenuStyleMNTM, // Momentum home-screen dashboard
+    MenuStyleCoverFlow, // album-coverflow carousel
     MenuStyleCount,
 } MenuStyle;
 
@@ -99,8 +99,8 @@ MenuStyle menu_get_style(void);
 /** Lock screen render style (Momentum-Firmware Control Center).
  */
 typedef enum {
-    LockScreenStyleDefault,
-    LockScreenStyleMomentum,
+    LockScreenStyleDefault, // weak text list (stock port)
+    LockScreenStyleMomentum, // Momentum Control Center grid + sliders
     LockScreenStyleCount,
 } LockScreenStyle;
 
