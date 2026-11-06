@@ -29,9 +29,16 @@ jobs:
           for man in sorted(root.glob('*.manifest.json')):
               meta = json.loads(man.read_text())
               parts = []
+              incomplete = False
               for i in range(meta['chunks']):
                   p = root / f"{meta['label']}.{i:02d}.b64"
+                  if not p.exists():
+                      print('incomplete', meta['label'], 'missing', p.name, '- skip')
+                      incomplete = True
+                      break
                   parts.append(p.read_text().strip())
+              if incomplete:
+                  continue
               raw = base64.b64decode(''.join(parts))
               dig = hashlib.sha256(raw).hexdigest()
               if dig != meta['sha256']:
