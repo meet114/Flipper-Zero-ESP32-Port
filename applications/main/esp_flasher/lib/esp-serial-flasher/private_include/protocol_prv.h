@@ -38,4 +38,3 @@ typedef struct {
 void log_loader_internal_error(error_code_t error);
 
 esp_loader_error_t send_cmd(const send_cmd_config *config);
-
