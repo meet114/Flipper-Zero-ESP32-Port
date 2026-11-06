@@ -29,4 +29,3 @@ void esp_flasher_reset_lines_deinit(void);
 /* Return false when the lines are not driven (mode Off or no pins on this board). */
 bool esp_flasher_reset_target(EspFlasherResetMode mode);
 bool esp_flasher_reset_enter_bootloader(EspFlasherResetMode mode);
-

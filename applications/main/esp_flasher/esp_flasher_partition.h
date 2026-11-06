@@ -19,4 +19,3 @@ bool esp_flasher_partition_parse(
     EspFlasherPartitionInfo* info,
     char* text,
     size_t text_size);
-
