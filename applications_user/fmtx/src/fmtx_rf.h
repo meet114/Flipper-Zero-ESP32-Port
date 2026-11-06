@@ -16,6 +16,8 @@ typedef enum {
 typedef struct {
     uint32_t hz;
     const uint8_t* regs;
+    // The radio in use between rfstart() and rfstop(): the board's CC1101 ("cc1101_int") or the
+    // external module ("cc1101_ext", chosen in Sub-GHz > Radio Settings).
     const SubGhzDevice* device;
     volatile uint16_t head;
     volatile uint16_t tail;
@@ -30,20 +32,23 @@ typedef struct {
     uint8_t sphase;
     uint8_t sample_decisions;
     uint8_t slot;
-    uint16_t run;
+    uint16_t run; // consecutive equal PDM bits (see rfbit)
     volatile uint8_t gain;
     FmtxRadio selected;
     bool bit;
     bool awake;
-    bool external;
-    bool devices_started;
+    bool external; // `device` is the external module (it must be end()ed)
+    bool devices_started; // subghz_devices_init() is pending its deinit
 } Rf;
 
+/** Allocate the radio state. The refill callback runs in the RMT interrupt and reads this
+ *  struct, so it is placed in internal RAM when that is possible. */
 Rf* rfalloc(void);
 void rffree(Rf* rf);
 void rfinit(Rf* rf, uint32_t hz);
 const uint8_t* rfregs(void);
 void rfselect(Rf* rf, FmtxRadio radio);
+/** true if the external module is chosen in Sub-GHz settings and answers (no side effects). */
 bool rfexternal(Rf* rf);
 bool rfstart(Rf* rf);
 bool rfresume(Rf* rf);
