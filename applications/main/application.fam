@@ -1,8 +1,11 @@
 App(
     appid="main_apps",
-    name="Main Apps",
+    name="Basic applications for main menu",
     apptype=FlipperAppType.METAPACKAGE,
     provides=[
+        "gpio",
+        "ibutton",
+        "infrared",
         "lfrfid",
         "nfc",
         "subghz",
@@ -10,15 +13,18 @@ App(
         "bad_usb",
         "u2f",
         "archive",
-        "gpio",
-        "ibutton",
-        "infrared",
-        "bt",
-        "desktop_settings",
-        "dolphin",
-        "power",
-        "storage",
-        "system",
-        "about",
+        "clock",
+        "doom",
+        "subghz_remote",
+        "main_apps_on_start",
+    ],
+)
+
+App(
+    appid="main_apps_on_start",
+    name="On start hooks",
+    apptype=FlipperAppType.METAPACKAGE,
+    provides=[
+        "cli",
     ],
 )
