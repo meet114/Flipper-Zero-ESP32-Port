@@ -149,12 +149,37 @@ static void nrf24_app_free(Nrf24App* app) {
 }
 
 #include <furi_hal_shared_pins.h>
+#include "nrf24_hw.h"
+
+static void nrf24_app_show_error(const char* text) {
+    DialogsApp* dialogs = furi_record_open(RECORD_DIALOGS);
+    DialogMessage* message = dialog_message_alloc();
+    dialog_message_set_header(message, "nRF24", 64, 0, AlignCenter, AlignTop);
+    dialog_message_set_text(message, text, 64, 32, AlignCenter, AlignCenter);
+    dialog_message_set_buttons(message, NULL, "OK", NULL);
+    dialog_message_show(dialogs, message);
+    dialog_message_free(message);
+    furi_record_close(RECORD_DIALOGS);
+}
 
 int32_t nrf24_app(void* args) {
     UNUSED(args);
     static const char owner;
     if(!furi_hal_shared_pins_acquire(&owner)) {
         FURI_LOG_E("Nrf24", "Shared pins busy (BW16/RFID)");
+        nrf24_app_show_error("Pins busy\nClose BW16/RFID\nthen retry");
+        return -1;
+    }
+
+    nrf24_hw_init();
+    nrf24_hw_acquire();
+    bool present = nrf24_hw_probe();
+    nrf24_hw_power_down();
+    nrf24_hw_release();
+    if(!present) {
+        nrf24_hw_deinit();
+        furi_hal_shared_pins_release(&owner);
+        nrf24_app_show_error("Built-in chip\nnot detected\n(CE43/CSN44)");
         return -1;
     }
 
@@ -164,6 +189,7 @@ int32_t nrf24_app(void* args) {
     view_dispatcher_run(app->view_dispatcher);
 
     nrf24_app_free(app);
+    nrf24_hw_deinit();
     furi_hal_shared_pins_release(&owner);
     return 0;
 }
