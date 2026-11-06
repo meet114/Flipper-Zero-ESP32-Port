@@ -1,0 +1,7 @@
+{
+  "label": "btshim",
+  "dest": "components/btshim/btshim.c",
+  "chunks": 8,
+  "sha256": "2e7665c875fac8ee4bd60d13760cd7c5ec5a1ecd152772af26d69633445ea8d8",
+  "bytes": 45038
+}
