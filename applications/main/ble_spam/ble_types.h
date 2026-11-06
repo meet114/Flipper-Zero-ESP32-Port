@@ -8,7 +8,6 @@
 typedef uint8_t BleAddress[6];
 typedef uint8_t BleAddressType;
 
-/* Keep the same public shape as the old ESP-IDF UUID used by the UI/log code. */
 typedef struct {
     uint16_t len;
     union {
