@@ -1,1 +1,4 @@
-https://github.com/0xchocolate/flipperzero-wifi-marauder feature_wifi_marauder_app /
+[subtree "wifi_marauder"]
+	url = https://github.com/0xchocolate/flipper-zero-wifi-marauder
+	branch = master
+	overlay = .
