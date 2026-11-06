@@ -1,1 +1,1 @@
-PLACEHOLDER
+$file:/tmp/content-wlan.txt
