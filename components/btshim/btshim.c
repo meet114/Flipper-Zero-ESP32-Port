@@ -332,3 +332,44 @@ static void bt_rpc_send_bytes_callback(void* context, uint8_t* bytes, size_t byt
         }
         bytes_sent += chunk;
 
+        /* Wait for the client's indication-confirm (flow control). Capped at 1s:
+         * a stalled confirm means the controller never sent the packet, so block
+         * briefly and drop the frame — blocking the full 3s only backs up the GUI
+         * worker and gives the GATT indication-confirm watchdog time to kill the
+         * whole connection. */
+        uint32_t event_flag = furi_event_flag_wait(
+            bt->rpc_event, BT_RPC_EVENT_ALL, FuriFlagWaitAny | FuriFlagNoClear, 1000);
+        if(event_flag & BT_RPC_EVENT_DISCONNECTED) {
+            BT_LOG_W("TX aborted: disconnected during send");
+            break;
+        } else if(event_flag == (uint32_t)FuriStatusErrorTimeout) {
+            BT_LOG_E(
+                "TX confirm timeout, dropping frame (free internal=%zu)",
+                heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+            break;
+        } else {
+            furi_event_flag_clear(bt->rpc_event, BT_RPC_EVENT_ALL & (~BT_RPC_EVENT_DISCONNECTED));
+        }
+    }
+    BT_LOG_D("TX done, sent %zu/%zu", bytes_sent, bytes_len);
+}
+
+static void bt_serial_buffer_is_empty_callback(void* context) {
+    furi_assert(context);
+    Bt* bt = context;
+    if(furi_hal_bt_check_profile_type(bt->current_profile, ble_profile_serial)) {
+        ble_profile_serial_notify_buffer_is_empty(bt->current_profile);
+    }
+}
+
+static void bt_open_rpc_connection(Bt* bt) {
+    BT_LOG_I("bt_open_rpc_connection: session=%p status=%d profile=%p",
+        (void*)bt->rpc_session, bt->status, (void*)bt->current_profile);
+    if(!bt->rpc_session && bt->status == BtStatusConnected) {
+        /* Open RPC record lazily on first connection */
+        if(!bt->rpc) {
+            BT_LOG_I("Opening RECORD_RPC...");
+            bt->rpc = furi_record_open(RECORD_RPC);
+            BT_LOG_I("RECORD_RPC opened: %p", (void*)bt->rpc);
+        }
+        furi_event_flag_clear(bt->rpc_event, BT_RPC_EVENT_DISCONNECTED);
