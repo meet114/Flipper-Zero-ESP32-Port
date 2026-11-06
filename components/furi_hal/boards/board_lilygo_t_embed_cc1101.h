@@ -18,7 +18,6 @@
 
 /* ---- Board metadata ---- */
 #define BOARD_NAME        "LilyGo T-Embed CC1101"
-/* Kurz-ID = Release-Ordner unter https://sor3nt.github.io/release/<BOARD_ID>/latest */
 #define BOARD_ID          "t-embed"
 #define BOARD_TARGET      "esp32s3"
 
@@ -87,9 +86,9 @@
 /* Band selection: SW1=H SW0=L → 315MHz, SW1=L SW0=H → 868/915MHz, SW1=H SW0=H → 434MHz */
 #define BOARD_CC1101_SPI_SHARED 1       /* CC1101 shares SPI2_HOST with LCD+SD (CS-muxed) */
 
-/* ---- NRF24L01 (built-in, parallel to CC1101 on the shared SPI bus) ---- */
-/* The T-Embed CC1101 board carries an on-board NRF24L01 that sits on the same
- * SPI2_HOST as LCD+SD+CC1101 but with its own CS and CE pins. IRQ is not wired. */
+/* ---- NRF24L01 (built-in on T-Embed CC1101 / Plus) ---- */
+/* On-board nRF24 on shared SPI2 with LCD+SD+CC1101; CE=GPIO43, CSN=GPIO44.
+ * Plus ships with the module fitted. IRQ is not wired. */
 #define BOARD_PIN_NRF24_SCK     BOARD_PIN_CC1101_SCK    /* IO11 -- shared */
 #define BOARD_PIN_NRF24_MISO    BOARD_PIN_CC1101_MISO   /* IO10 -- shared */
 #define BOARD_PIN_NRF24_MOSI    BOARD_PIN_CC1101_MOSI   /* IO9  -- shared */
