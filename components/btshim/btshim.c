@@ -446,3 +446,22 @@ static bool bt_on_gap_event_callback(GapEvent event, void* context) {
         bt->status = BtStatusAdvertising;
         do_update_status = true;
         ret = true;
+    } else if(event.type == GapEventTypeStopAdvertising) {
+        bt->status = BtStatusOff;
+        do_update_status = true;
+        ret = true;
+    } else if(event.type == GapEventTypePinCodeShow) {
+        BT_LOG_I("Passkey display event received; queueing viewport update");
+        bt->pin = event.data.pin_code;
+        BtMessage message = {
+            .type = BtMessageTypePinCodeShow, .data.pin_code = event.data.pin_code};
+        if(furi_message_queue_put(bt->message_queue, &message, 0) != FuriStatusOk) {
+            BT_LOG_E("Passkey display event dropped: BT message queue full");
+            bt->pin = 0;
+            return false;
+        }
+        ret = true;
+    } else if(event.type == GapEventTypePairingStalled) {
+        BT_LOG_W("Pairing stalled event received; queueing user guidance");
+        BtMessage message = {.type = BtMessageTypePairingStalled};
+        if(furi_message_queue_put(bt->message_queue, &message, 0) != FuriStatusOk) {
