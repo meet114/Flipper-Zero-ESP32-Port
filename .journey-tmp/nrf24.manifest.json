@@ -1,7 +1,0 @@
-{
-  "label": "nrf24",
-  "dest": "components/furi_hal/furi_hal_nrf24.c",
-  "chunks": 8,
-  "sha256": "55ce3e204e539bcad9bf2b5e0bd0023382890558849c44f3565d2b60cd8bf503",
-  "bytes": 17329
-}
