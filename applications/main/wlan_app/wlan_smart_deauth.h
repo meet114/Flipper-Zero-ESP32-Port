@@ -63,6 +63,8 @@ typedef struct {
     uint8_t       client_slot_count;
 } SdChannelInfo;
 
+/* Versi ramping untuk view model — hanya field yang digambar di mode Scan
+ * (tanpa clients[]/bssid/pmf/...). Menekan SdViewModel dari ~8KB → ~1.1KB. */
 typedef struct {
     uint8_t channel;
     uint8_t ap_count;
@@ -77,8 +79,8 @@ typedef struct {
     bool       running;
 
     SdChannelView channels[13];
-    uint8_t       detected_map[13];
-    uint8_t       detected_count;
+    uint8_t       detected_map[13];   // display pos -> index into channels[] (hanya AP terdeteksi)
+    uint8_t       detected_count;     // jumlah kanal dengan AP terdeteksi
     uint8_t       scan_cursor;
     bool          scanning;
 
@@ -99,7 +101,7 @@ typedef struct {
     uint8_t       monitor_client_count;
     uint32_t      monitor_beacon_count;
     uint32_t      monitor_data_count;
-    uint32_t      monitor_rate_bps;
+    uint32_t      monitor_rate_bps;   // throughput data frame target (byte/detik)
     bool          monitor_running;
 } SdViewModel;
 
