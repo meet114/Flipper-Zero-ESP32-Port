@@ -373,3 +373,45 @@ static void bt_open_rpc_connection(Bt* bt) {
             BT_LOG_I("RECORD_RPC opened: %p", (void*)bt->rpc);
         }
         furi_event_flag_clear(bt->rpc_event, BT_RPC_EVENT_DISCONNECTED);
+        bool is_serial = furi_hal_bt_check_profile_type(bt->current_profile, ble_profile_serial);
+        BT_LOG_I("Profile is_serial=%d", is_serial);
+        if(is_serial) {
+            bt->rpc_session = rpc_session_open(bt->rpc, RpcOwnerBle);
+            if(bt->rpc_session) {
+                BT_LOG_I("RPC session opened OK");
+                rpc_session_set_send_bytes_callback(bt->rpc_session, bt_rpc_send_bytes_callback);
+                rpc_session_set_buffer_is_empty_callback(
+                    bt->rpc_session, bt_serial_buffer_is_empty_callback);
+                rpc_session_set_context(bt->rpc_session, bt);
+                /* Start RX feeder thread */
+                furi_stream_buffer_reset(bt->rx_stream);
+                bt->rx_thread = furi_thread_alloc_ex(
+                    "BtRxFeeder", 4096, bt_rx_feeder_thread, bt);
+                furi_thread_start(bt->rx_thread);
+                ble_profile_serial_set_event_callback(
+                    bt->current_profile, BT_RX_STREAM_SIZE, bt_serial_event_callback, bt);
+                ble_profile_serial_set_rpc_active(
+                    bt->current_profile, FuriHalBtSerialRpcStatusActive);
+                BT_LOG_I("RPC over BLE fully initialized");
+            } else {
+                BT_LOG_W("RPC is busy, failed to open new session");
+            }
+        }
+    }
+}
+
+static void bt_close_rpc_connection(Bt* bt) {
+    if(furi_hal_bt_check_profile_type(bt->current_profile, ble_profile_serial) &&
+       bt->rpc_session) {
+        FURI_LOG_I(TAG, "Close RPC connection");
+        ble_profile_serial_set_rpc_active(
+            bt->current_profile, FuriHalBtSerialRpcStatusNotActive);
+        furi_event_flag_set(bt->rpc_event, BT_RPC_EVENT_DISCONNECTED);
+        /* Stop RX feeder thread */
+        if(bt->rx_thread) {
+            furi_thread_flags_set(furi_thread_get_id(bt->rx_thread), BT_RX_EVENT_STOP);
+            furi_thread_join(bt->rx_thread);
+            furi_thread_free(bt->rx_thread);
+            bt->rx_thread = NULL;
+        }
+        rpc_session_close(bt->rpc_session);
