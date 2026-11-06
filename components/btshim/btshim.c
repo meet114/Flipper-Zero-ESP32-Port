@@ -288,3 +288,47 @@ static uint16_t bt_serial_event_callback(SerialServiceEvent event, void* context
         /* Non-blocking write to intermediate buffer — MUST NOT block GATTS task */
         size_t sent = furi_stream_buffer_send(
             bt->rx_stream, event.data.buffer, event.data.size, 0);
+        if(sent != event.data.size) {
+            BT_LOG_E("RX overflow: %zu/%u bytes buffered", sent, event.data.size);
+        }
+        /* Wake the feeder thread */
+        furi_thread_flags_set(furi_thread_get_id(bt->rx_thread), BT_RX_EVENT_DATA);
+        ret = furi_stream_buffer_spaces_available(bt->rx_stream);
+    } else if(event.event == SerialServiceEventTypeDataSent) {
+        furi_event_flag_set(bt->rpc_event, BT_RPC_EVENT_BUFF_SENT);
+    } else if(event.event == SerialServiceEventTypesBleResetRequest) {
+        FURI_LOG_I(TAG, "BLE restart request received");
+    }
+    return ret;
+}
+
+static void bt_rpc_send_bytes_callback(void* context, uint8_t* bytes, size_t bytes_len) {
+    furi_assert(context);
+    Bt* bt = context;
+
+    /* Hot path: every RPC response goes through here, the UART would cost more than the radio. */
+    BT_LOG_D("TX send %zu bytes, max_pkt=%u", bytes_len, bt->max_packet_size);
+
+    if(furi_event_flag_get(bt->rpc_event) & BT_RPC_EVENT_DISCONNECTED) {
+        BT_LOG_W("TX aborted: disconnected");
+        return;
+    }
+    furi_event_flag_clear(bt->rpc_event, BT_RPC_EVENT_ALL & (~BT_RPC_EVENT_DISCONNECTED));
+    size_t bytes_sent = 0;
+    while(bytes_sent < bytes_len) {
+        size_t bytes_remain = bytes_len - bytes_sent;
+        size_t chunk = (bytes_remain > bt->max_packet_size) ? bt->max_packet_size : bytes_remain;
+        bool ok = ble_profile_serial_tx(bt->current_profile, &bytes[bytes_sent], chunk);
+        if(!ok) {
+            /* Indication couldn't be queued — usually the controller is out of
+             * internal RAM (BLE_INIT: Malloc failed). Drop the frame instead of
+             * wedging the session; the next frame is a fresh attempt. */
+            BT_LOG_E(
+                "TX chunk failed at offset %zu/%zu (free internal=%zu)",
+                bytes_sent,
+                bytes_len,
+                heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+            break;
+        }
+        bytes_sent += chunk;
+
