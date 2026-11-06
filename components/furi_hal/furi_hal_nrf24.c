@@ -240,3 +240,217 @@ static bool furi_hal_nrf24_power_down_board_module(void) {
     return true;
 #endif
 }
+
+#if FURI_HAL_NRF24_HAS_EXT
+/* Power the module routed by the NRF24 handle down. Harmless when no chip answers. */
+static void furi_hal_nrf24_park_routed_module(void) {
+    const uint8_t command[2] = {NRF24_CMD_W_CONFIG, 0x00};
+    furi_hal_spi_acquire(&furi_hal_spi_bus_handle_nrf24);
+    furi_hal_spi_bus_tx(&furi_hal_spi_bus_handle_nrf24, command, sizeof(command), 100);
+    furi_hal_spi_release(&furi_hal_spi_bus_handle_nrf24);
+}
+
+/* Register round-trip probe on the already-routed SPI handle, mirroring nrf24_hw_probe()
+ * (and furi_hal_subghz_ext's CC1101 probe): write two patterns to RF_CH and read them
+ * back. Leaves the chip powered down either way. Caller holds the bus-free (no acquire
+ * active) and the mutex. */
+static bool furi_hal_nrf24_probe_routed_module(void) {
+    const uint8_t pwr_up[2] = {NRF24_CMD_W_CONFIG, NRF24_CONFIG_PWR_UP};
+    furi_hal_spi_acquire(&furi_hal_spi_bus_handle_nrf24);
+    furi_hal_spi_bus_tx(&furi_hal_spi_bus_handle_nrf24, pwr_up, sizeof(pwr_up), 100);
+    furi_hal_spi_release(&furi_hal_spi_bus_handle_nrf24);
+    esp_rom_delay_us(5000);
+
+    bool ok = false;
+    for(uint32_t attempt = 0; attempt < 3 && !ok; attempt++) {
+        const uint8_t w1[2] = {NRF24_CMD_W_REGISTER | NRF24_REG_RF_CH, 0x55};
+        uint8_t r1_tx[2] = {NRF24_CMD_R_REGISTER | NRF24_REG_RF_CH, 0xFF};
+        uint8_t r1_rx[2] = {0};
+        const uint8_t w2[2] = {NRF24_CMD_W_REGISTER | NRF24_REG_RF_CH, 0x2A};
+        uint8_t r2_tx[2] = {NRF24_CMD_R_REGISTER | NRF24_REG_RF_CH, 0xFF};
+        uint8_t r2_rx[2] = {0};
+
+        furi_hal_spi_acquire(&furi_hal_spi_bus_handle_nrf24);
+        furi_hal_spi_bus_tx(&furi_hal_spi_bus_handle_nrf24, w1, sizeof(w1), 100);
+        furi_hal_spi_bus_trx(&furi_hal_spi_bus_handle_nrf24, r1_tx, r1_rx, sizeof(r1_tx), 100);
+        furi_hal_spi_bus_tx(&furi_hal_spi_bus_handle_nrf24, w2, sizeof(w2), 100);
+        furi_hal_spi_bus_trx(&furi_hal_spi_bus_handle_nrf24, r2_tx, r2_rx, sizeof(r2_tx), 100);
+        furi_hal_spi_release(&furi_hal_spi_bus_handle_nrf24);
+
+        ok = (r1_rx[1] == 0x55 && r2_rx[1] == 0x2A);
+        if(!ok) esp_rom_delay_us(2000);
+    }
+    furi_hal_nrf24_park_routed_module();
+    return ok;
+}
+
+static void furi_hal_nrf24_ext_pads_idle(void) {
+    const GpioPin csn = furi_hal_nrf24.csn;
+    const GpioPin ce = furi_hal_nrf24.ce;
+    furi_hal_gpio_init_owned(&csn, GpioModeInput, GpioPullNo, GpioSpeedLow, furi_hal_nrf24_owner);
+    furi_hal_gpio_init_owned(&ce, GpioModeInput, GpioPullNo, GpioSpeedLow, furi_hal_nrf24_owner);
+    furi_hal_gpio_unreserve(&csn, furi_hal_nrf24_owner);
+    furi_hal_gpio_unreserve(&ce, furi_hal_nrf24_owner);
+    furi_hal_nrf24.csn.pin = UINT16_MAX;
+    furi_hal_nrf24.ce.pin = UINT16_MAX;
+}
+
+static void furi_hal_nrf24_end_external_locked(void);
+
+static FuriHalNrf24ExtResult furi_hal_nrf24_begin_external_locked(
+    const FuriHalNrf24ExtConfig* config) {
+    if(!furi_hal_nrf24_config_valid(config)) return FuriHalNrf24ExtBadConfig;
+
+    const GpioPin csn = {.port = NULL, .pin = config->csn_pin};
+    const GpioPin ce = {.port = NULL, .pin = config->ce_pin};
+    if(!furi_hal_gpio_reserve(&csn, furi_hal_nrf24_owner)) {
+        ESP_LOGW(
+            TAG,
+            "External module: GPIO%u is in use by %s",
+            (unsigned)csn.pin,
+            furi_hal_gpio_get_reservation(&csn));
+        return FuriHalNrf24ExtPinInUse;
+    }
+    if(!furi_hal_gpio_reserve(&ce, furi_hal_nrf24_owner)) {
+        ESP_LOGW(
+            TAG,
+            "External module: GPIO%u is in use by %s",
+            (unsigned)ce.pin,
+            furi_hal_gpio_get_reservation(&ce));
+        furi_hal_gpio_unreserve(&csn, furi_hal_nrf24_owner);
+        return FuriHalNrf24ExtPinInUse;
+    }
+
+    /* The board's module is powered down and deselected before the bus is handed over. */
+    furi_hal_gpio_write(&furi_hal_nrf24_board_ce, false);
+    furi_hal_nrf24_park_routed_module();
+
+    furi_hal_nrf24.csn.pin = config->csn_pin;
+    furi_hal_nrf24.ce.pin = config->ce_pin;
+    if(!furi_hal_spi_bus_handle_set_cs(&furi_hal_spi_bus_handle_nrf24, &furi_hal_nrf24.csn)) {
+        furi_hal_gpio_unreserve(&csn, furi_hal_nrf24_owner);
+        furi_hal_gpio_unreserve(&ce, furi_hal_nrf24_owner);
+        furi_hal_nrf24.csn.pin = UINT16_MAX;
+        furi_hal_nrf24.ce.pin = UINT16_MAX;
+        return FuriHalNrf24ExtBusy;
+    }
+    /* The SPI driver let go of the board module's CSN pad: keep it high (deselected) and its
+     * CE low for the whole session, MISO is shared. */
+    furi_hal_gpio_init(&gpio_nrf24_cs, GpioModeOutputPushPull, GpioPullNo, GpioSpeedLow);
+    furi_hal_gpio_write(&gpio_nrf24_cs, true);
+    furi_hal_gpio_init(&furi_hal_nrf24_board_ce, GpioModeOutputPushPull, GpioPullNo, GpioSpeedLow);
+    furi_hal_gpio_write(&furi_hal_nrf24_board_ce, false);
+
+    furi_hal_gpio_init_owned(
+        &furi_hal_nrf24.ce,
+        GpioModeOutputPushPull,
+        GpioPullUp,
+        GpioSpeedVeryHigh,
+        furi_hal_nrf24_owner);
+    furi_hal_gpio_write(&furi_hal_nrf24.ce, false);
+    /* Automatic light sleep would otherwise pull the (header) CSN pad low. */
+    (void)furi_hal_power_light_sleep_hold_pin_high(csn.pin, true);
+
+    if(!furi_hal_nrf24_probe_routed_module()) {
+        ESP_LOGW(
+            TAG,
+            "External module: no NRF24 on CSN=GPIO%u CE=GPIO%u",
+            (unsigned)csn.pin,
+            (unsigned)ce.pin);
+        furi_hal_nrf24_end_external_locked();
+        return FuriHalNrf24ExtNotDetected;
+    }
+
+    furi_hal_nrf24.external = true;
+    ESP_LOGI(
+        TAG,
+        "External NRF24 routed: CSN=GPIO%u CE=GPIO%u",
+        (unsigned)csn.pin,
+        (unsigned)ce.pin);
+    return FuriHalNrf24ExtOk;
+}
+
+static void furi_hal_nrf24_end_external_locked(void) {
+    furi_hal_gpio_write(&furi_hal_nrf24.ce, false);
+    furi_hal_nrf24_park_routed_module();
+
+    bool restored = false;
+    for(uint32_t i = 0; i < 100 && !restored; i++) {
+        restored = furi_hal_spi_bus_handle_set_cs(&furi_hal_spi_bus_handle_nrf24, &gpio_nrf24_cs);
+        if(!restored) furi_delay_ms(5);
+    }
+    if(!restored) {
+        /* The handle is stuck inside a transaction; staying routed keeps things consistent. */
+        ESP_LOGE(TAG, "External module: SPI handle busy, session stays open");
+        return;
+    }
+
+    (void)furi_hal_power_light_sleep_hold_pin_high(furi_hal_nrf24.csn.pin, false);
+    furi_hal_nrf24_ext_pads_idle();
+    /* Board module back to the idle the NRF24 app leaves it in. */
+    furi_hal_gpio_init_simple(&furi_hal_nrf24_board_ce, GpioModeAnalog);
+    furi_hal_nrf24.external = false;
+    ESP_LOGI(TAG, "External NRF24 released");
+}
+#endif
+
+FuriHalNrf24ExtResult furi_hal_nrf24_session_begin(void) {
+    FuriMutex* mutex = furi_hal_nrf24_lock();
+    FuriHalNrf24ExtResult result = FuriHalNrf24ExtOk;
+    if(furi_hal_nrf24.refcount > 0) {
+        /* Already open (possibly by an outer scene): just take another reference. */
+        furi_hal_nrf24.refcount++;
+    } else {
+        furi_hal_nrf24_config_load_locked();
+        const FuriHalNrf24ExtConfig config = furi_hal_nrf24.config;
+        furi_hal_nrf24.external = false;
+        if(config.use_external) {
+#if FURI_HAL_NRF24_HAS_EXT
+            result = furi_hal_nrf24_begin_external_locked(&config);
+#else
+            result = FuriHalNrf24ExtUnsupported;
+#endif
+        } else {
+            /* Board module: CE becomes an output driven low (what the app always did). */
+            furi_hal_gpio_init(
+                &furi_hal_nrf24_board_ce, GpioModeOutputPushPull, GpioPullUp, GpioSpeedVeryHigh);
+            furi_hal_gpio_write(&furi_hal_nrf24_board_ce, false);
+        }
+        if(result == FuriHalNrf24ExtOk) furi_hal_nrf24.refcount = 1;
+    }
+    if(result == FuriHalNrf24ExtOk) {
+        /* CE/RX/TX may remain active while the scene releases the SPI host. */
+        furi_hal_power_insomnia_enter();
+    }
+    furi_hal_nrf24_unlock(mutex);
+    return result;
+}
+
+void furi_hal_nrf24_session_end(void) {
+    FuriMutex* mutex = furi_hal_nrf24_lock();
+    if(furi_hal_nrf24.refcount > 1) {
+        /* An outer holder is still using the radio: drop our reference only. */
+        furi_hal_nrf24.refcount--;
+        furi_hal_power_insomnia_exit();
+    } else if(furi_hal_nrf24.refcount == 1) {
+#if FURI_HAL_NRF24_HAS_EXT
+        if(furi_hal_nrf24.external) {
+            furi_hal_nrf24_end_external_locked();
+            if(furi_hal_nrf24.external) { /* could not be released yet: keep the session */
+                furi_hal_nrf24_unlock(mutex);
+                return;
+            }
+        } else
+#endif
+        {
+            furi_hal_gpio_write(&furi_hal_nrf24_board_ce, false);
+            if(!furi_hal_nrf24_power_down_board_module()) {
+                ESP_LOGW(TAG, "Board NRF24 power-down SPI command failed after retries");
+            }
+            furi_hal_gpio_init_simple(&furi_hal_nrf24_board_ce, GpioModeAnalog);
+        }
+        furi_hal_nrf24.refcount = 0;
+        furi_hal_power_insomnia_exit();
+    }
+    furi_hal_nrf24_unlock(mutex);
+}
