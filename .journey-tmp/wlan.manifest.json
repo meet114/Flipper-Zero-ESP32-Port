@@ -1,7 +1,0 @@
-{
-  "label": "wlan",
-  "dest": "components/wifi/wlan_hal.c",
-  "chunks": 17,
-  "sha256": "6297fd25e96a52b1c50ceb89ffd37cf07c359b343de4105a82518d37e9c4a256",
-  "bytes": 37738
-}
