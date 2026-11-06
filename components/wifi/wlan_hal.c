@@ -338,3 +338,755 @@ static void wlan_worker_fn(void* arg) {
             wcfg.sta.pmf_cfg.required = false;
             s_wifi_auto_reconnect = true;
             wlan_set_connection_sleep_inhibited(true);
+            esp_wifi_set_config(WIFI_IF_STA, &wcfg);
+            err = esp_wifi_connect();
+            if(err != ESP_OK) {
+                ESP_LOGE(TAG, "connect: %s", esp_err_to_name(err));
+                s_wifi_auto_reconnect = false;
+                wlan_set_connection_sleep_inhibited(false);
+                ok = false;
+            }
+            break;
+        }
+
+        case WCMD_DISCONNECT:
+            s_wifi_auto_reconnect = false;
+            wlan_set_connection_sleep_inhibited(false);
+            esp_wifi_disconnect();
+            s_wifi_connected = false;
+            s_own_ip = 0;
+            s_own_netmask = 0;
+            break;
+
+        case WCMD_SEND_ETH_RAW: {
+            int eth_err = esp_wifi_internal_tx(WIFI_IF_STA, cmd.send_eth.buf, cmd.send_eth.len);
+            if(eth_err != 0) {
+                static uint32_t eth_err_count = 0;
+                static uint32_t eth_err_last_log = 0;
+                eth_err_count++;
+                if(eth_err_count - eth_err_last_log >= 20) {
+                    eth_err_last_log = eth_err_count;
+                    ESP_LOGW(TAG, "internal_tx err=%d (count=%lu)",
+                        eth_err, (unsigned long)eth_err_count);
+                }
+            }
+            free(cmd.send_eth.buf);
+            break;
+        }
+
+        case WCMD_SET_CHANNEL:
+            esp_wifi_set_channel(cmd.set_channel.channel, WIFI_SECOND_CHAN_NONE);
+            break;
+
+        case WCMD_SET_PROMISC:
+            // CB immer setzen (auch auf NULL), sonst bleibt ein zuvor
+            // installierter RX-Callback aus einem anderen Subsystem aktiv.
+            esp_wifi_set_promiscuous_rx_cb(cmd.set_promisc.enable ? cmd.set_promisc.cb : NULL);
+            esp_wifi_set_promiscuous(cmd.set_promisc.enable);
+            break;
+
+        case WCMD_SEND_RAW: {
+            // en_sys_seq=true: System füllt die Sequence-Number selbst → keine
+            // duplizierten Frames mit fixem Seq aus dem Template.
+            esp_err_t tx_err = esp_wifi_80211_tx(
+                WIFI_IF_STA, cmd.send_raw.buf, cmd.send_raw.len, true);
+            if(tx_err != ESP_OK) {
+                ESP_LOGD(TAG, "80211_tx: %s", esp_err_to_name(tx_err));
+            }
+            break;
+        }
+
+        case WCMD_SCAN: {
+            err = esp_wifi_scan_start(cmd.scan.config, true);
+            if(err != ESP_OK) {
+                ESP_LOGE(TAG, "scan: %s", esp_err_to_name(err));
+                *cmd.scan.out_count = 0;
+                *cmd.scan.out_records = NULL;
+                ok = false;
+                break;
+            }
+            uint16_t count = 0;
+            esp_wifi_scan_get_ap_num(&count);
+            if(count > cmd.scan.max_count) count = cmd.scan.max_count;
+            if(count > 0) {
+                *cmd.scan.out_records = malloc(count * sizeof(wifi_ap_record_t));
+                if(*cmd.scan.out_records) {
+                    esp_wifi_scan_get_ap_records(&count, *cmd.scan.out_records);
+                } else {
+                    count = 0;
+                }
+            } else {
+                *cmd.scan.out_records = NULL;
+            }
+            *cmd.scan.out_count = count;
+            break;
+        }
+
+        case WCMD_RUN_FN:
+            if(cmd.run_fn.fn) cmd.run_fn.fn(cmd.run_fn.arg);
+            break;
+
+        case WCMD_QUIT:
+            ESP_LOGI(TAG, "Worker quitting");
+            if(cmd.done) *cmd.done = true;
+            vTaskDelete(NULL);
+            return;
+        }
+
+        if(cmd.result) *cmd.result = ok;
+        if(cmd.done) *cmd.done = true;
+    }
+}
+
+static bool wlan_ensure_worker(void) {
+    if(s_worker_task) return true;
+
+    s_cmd_queue = xQueueCreate(4, sizeof(WlanCmd));
+    if(!s_cmd_queue) return false;
+
+    s_worker_stack = heap_caps_malloc(
+        WLAN_HAL_WORKER_STACK * sizeof(StackType_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if(!s_worker_stack) {
+        vQueueDelete(s_cmd_queue);
+        s_cmd_queue = NULL;
+        ESP_LOGE(TAG, "Cannot alloc worker stack");
+        return false;
+    }
+
+    s_worker_task = xTaskCreateStaticPinnedToCore(
+        wlan_worker_fn, "WlanWorker", WLAN_HAL_WORKER_STACK,
+        NULL, 5, s_worker_stack, &s_worker_buf, 0);
+    return s_worker_task != NULL;
+}
+
+bool wlan_hal_ensure_worker(void) {
+    return wlan_ensure_worker();
+}
+
+static void wlan_send_cmd_sync(WlanCmd* cmd) {
+    volatile bool done = false;
+    cmd->done = &done;
+    xQueueSend(s_cmd_queue, cmd, portMAX_DELAY);
+    while(!done) {
+        furi_delay_ms(10);
+    }
+}
+
+static bool wlan_start_owned(bool survey) {
+    if(s_started) return true;
+
+    if(!wlan_connection_sleep_inhibit_mutex_init()) {
+        ESP_LOGE(TAG, "Failed to allocate Wi-Fi sleep-inhibit mutex");
+        return false;
+    }
+
+    if(!s_light_sleep_inhibited) {
+        furi_hal_power_light_sleep_inhibit_enter();
+        s_light_sleep_inhibited = true;
+    }
+
+    if(!survey) {
+        Bt* bt = furi_record_open(RECORD_BT);
+        s_bt_was_on = bt_is_enabled(bt);
+        if(s_bt_was_on) bt_stop_stack(bt);
+        furi_record_close(RECORD_BT);
+    } else {
+        s_bt_was_on = false; /* Survey owns separate restoration state. */
+    }
+
+    if(!wlan_ensure_worker()) {
+        if(s_light_sleep_inhibited) {
+            s_light_sleep_inhibited = false;
+            furi_hal_power_light_sleep_inhibit_exit();
+        }
+        return false;
+    }
+
+    volatile bool result = false;
+    WlanCmd cmd = {.type = WCMD_INIT_START, .survey_owned = survey, .result = &result};
+    wlan_send_cmd_sync(&cmd);
+
+    if(result) {
+        s_started = true;
+        ESP_LOGI(TAG, "WiFi started (light sleep inhibited)");
+    } else if(s_light_sleep_inhibited) {
+        s_light_sleep_inhibited = false;
+        furi_hal_power_light_sleep_inhibit_exit();
+    }
+    return result;
+}
+
+static void wlan_stop_owned(bool survey) {
+    if(s_started) {
+        WlanCmd cmd = {.type = WCMD_STOP_DEINIT, .survey_owned = survey};
+        wlan_send_cmd_sync(&cmd);
+        s_started = false;
+        ESP_LOGI(TAG, "WiFi stopped");
+    }
+
+    if(s_light_sleep_inhibited) {
+        s_light_sleep_inhibited = false;
+        furi_hal_power_light_sleep_inhibit_exit();
+    }
+
+    if(s_bt_was_on) {
+        Bt* bt = furi_record_open(RECORD_BT);
+        bt_start_stack(bt);
+        furi_record_close(RECORD_BT);
+        s_bt_was_on = false;
+    }
+}
+
+bool wlan_hal_start(void) {
+    if(!radio_lock()) return false;
+    bool ok = !survey_active() && wlan_start_owned(false);
+    if(!ok && !survey_active() && s_bt_was_on) wlan_stop_owned(false);
+    radio_unlock();
+    return ok;
+}
+
+void wlan_hal_stop(void) {
+    if(!radio_lock()) return;
+    if(!survey_active()) wlan_stop_owned(false);
+    radio_unlock();
+}
+
+/* Both callbacks run on the existing non-Furi WLAN worker, where the IDF
+ * driver's TLS is valid. Do not copy saved credentials into app memory/logs. */
+static void survey_save_station(void* unused) {
+    UNUSED(unused);
+    wifi_mode_t mode = WIFI_MODE_NULL;
+    s_survey_saved.error = esp_wifi_get_mode(&mode);
+    if(s_survey_saved.error != ESP_OK || mode != WIFI_MODE_STA) return;
+    s_survey_saved.error = esp_wifi_get_config(WIFI_IF_STA, &s_survey_saved.config);
+    s_survey_saved.valid = s_survey_saved.error == ESP_OK;
+}
+static void survey_restore_station(void* unused) {
+    UNUSED(unused);
+    s_survey_saved.error = esp_wifi_set_config(WIFI_IF_STA, &s_survey_saved.config);
+    s_auth_fail_latched = s_survey_saved.auth_failed;
+    s_wifi_auto_reconnect = s_survey_saved.reconnect;
+    if(s_survey_saved.error == ESP_OK && s_survey_saved.reconnect)
+        s_survey_saved.error = esp_wifi_connect();
+}
+static bool survey_restore_owned(void) {
+    bool ok = true;
+    if(s_survey_saved.suspended) {
+        survey_status("RESTORING WI-FI");
+        ok = wlan_start_owned(true);
+        if(ok && s_survey_saved.valid)
+            ok = wlan_hal_survey_run(survey_restore_station, NULL) && s_survey_saved.error == ESP_OK;
+        s_bt_was_on = s_survey_saved.bt_restore;
+    } else if(s_survey_bt_restore) {
+        survey_status("RESTORING BLUETOOTH");
+        Bt* bt = furi_record_open(RECORD_BT);
+        bt_start_stack(bt);
+        furi_record_close(RECORD_BT);
+        ok = wlan_bt_stack_up();
+    }
+    memset(&s_survey_saved, 0, sizeof(s_survey_saved));
+    s_survey_bt_restore = false;
+    return ok;
+}
+bool wlan_hal_survey_begin(bool wifi) {
+    if(!radio_lock()) { survey_status("RADIO IS CHANGING"); return false; }
+    if(survey_active() || wlan_hal_beacon_spam_is_running() || wlan_hal_evil_portal_is_running()) {
+        survey_status("OTHER RADIO APP ACTIVE");
+        radio_unlock(); return false;
+    }
+    __atomic_store_n(&s_survey_active, true, __ATOMIC_RELEASE);
+    memset(&s_survey_saved, 0, sizeof(s_survey_saved));
+    s_survey_saved.started = s_started;
+    s_survey_saved.bt_restore = s_bt_was_on;
+    s_survey_saved.reconnect = s_wifi_connected || s_wifi_auto_reconnect;
+    s_survey_saved.auth_failed = s_auth_fail_latched;
+    s_survey_bt_restore = wlan_bt_stack_up();
+    bool ok = true;
+    const char* failure = "RADIO START FAILED";
+    if(s_started) {
+        survey_status("SAVING WI-FI STATE");
+        ok = wlan_hal_survey_run(survey_save_station, NULL) && s_survey_saved.valid;
+        failure = "OTHER WI-FI MODE ACTIVE";
+        if(ok) {
+            survey_status("DISCONNECTING WI-FI");
+            s_bt_was_on = false;
+            wlan_stop_owned(true);
+            s_survey_saved.suspended = true;
+        }
+    }
+    if(ok) {
+        survey_status("RELEASING BLUETOOTH");
+        /* Let the Bluetooth service release its own profile and controller;
+         * the advertising icon alone does not tell us whether they exist. */
+        Bt* bt = furi_record_open(RECORD_BT);
+        bt_stop_stack(bt);
+        furi_record_close(RECORD_BT);
+        ok = wlan_bt_stack_down();
+        failure = "BLUETOOTH STOP FAILED";
+    }
+    if(ok) {
+        survey_status("ALLOCATING RADIO WORKER");
+        ok = wlan_ensure_worker();
+        failure = "RADIO MEMORY LOW";
+    }
+    if(ok && wifi) {
+        survey_status("STARTING EXCLUSIVE WI-FI");
+        ok = wlan_start_owned(true);
+        failure = "WI-FI INIT FAILED";
+    }
+    if(!ok) {
+        /* If capture was refused, the old radio is still untouched. */
+        if(!s_survey_saved.started || s_survey_saved.suspended) {
+            wlan_stop_owned(true);
+            if(!survey_restore_owned()) failure = "RADIO RESTORE FAILED";
+        } else {
+            memset(&s_survey_saved, 0, sizeof(s_survey_saved));
+            s_survey_bt_restore = false;
+        }
+        __atomic_store_n(&s_survey_active, false, __ATOMIC_RELEASE);
+        survey_status(failure);
+    } else survey_status("EXCLUSIVE RADIO READY");
+    radio_unlock();
+    return ok;
+}
+
+bool wlan_hal_survey_run(WlanHalWorkerFn fn, void* arg) {
+    if(!fn || !survey_active() || !s_cmd_queue) return false;
+    volatile bool result = false;
+    WlanCmd cmd = {.type = WCMD_RUN_FN, .survey_owned = true,
+        .run_fn = {.fn = fn, .arg = arg}, .result = &result};
+    wlan_send_cmd_sync(&cmd);
+    return result;
+}
+
+void wlan_hal_survey_end(void) {
+    /* Only the owning application calls end, after its worker has stopped. */
+    while(!radio_lock()) furi_delay_ms(1);
+    if(survey_active()) {
+        survey_status("STOPPING SURVEY RADIO");
+        wlan_stop_owned(true);
+        bool restored = survey_restore_owned();
+        __atomic_store_n(&s_survey_active, false, __ATOMIC_RELEASE);
+        survey_status(restored ? "RADIO RESTORED" : "RADIO RESTORE FAILED");
+    }
+    radio_unlock();
+}
+
+void wlan_hal_set_bt_restore(bool restore) {
+    if(survey_active()) return;
+    s_bt_was_on = restore;
+}
+
+bool wlan_hal_is_started(void) {
+    return s_started;
+}
+
+bool wlan_hal_connect(const char* ssid, const char* password, const uint8_t* bssid, uint8_t channel) {
+    if(survey_active()) return false;
+    if(!s_started || !ssid) return false;
+
+    WlanCmd cmd = {.type = WCMD_CONNECT};
+    memset(&cmd.connect, 0, sizeof(cmd.connect));
+    strncpy(cmd.connect.ssid, ssid, 32);
+    if(password && password[0]) {
+        strncpy(cmd.connect.password, password, 64);
+    }
+    if(bssid) {
+        memcpy(cmd.connect.bssid, bssid, 6);
+        cmd.connect.bssid_set = true;
+    }
+    cmd.connect.channel = channel;
+
+    volatile bool result = false;
+    cmd.result = &result;
+    wlan_send_cmd_sync(&cmd);
+    return result;
+}
+
+void wlan_hal_disconnect(void) {
+    if(!s_started) return;
+    WlanCmd cmd = {.type = WCMD_DISCONNECT};
+    wlan_send_cmd_sync(&cmd);
+}
+
+bool wlan_hal_is_connected(void) {
+    return s_wifi_connected;
+}
+
+typedef struct {
+    wifi_ap_record_t* out;
+    bool result;
+} WlanGetApArg;
+
+/* Läuft im wlan-Worker-Task: esp_wifi_sta_get_ap_info() ist ioctl-basiert und
+ * nutzt pthread-TLS des WiFi-Treibers — ein Aufruf aus einem FuriThread (z.B.
+ * der WiFi-App) crasht (LoadProhibited). Daher via wlan_hal_run_in_worker. */
+static void wlan_get_ap_worker(void* p) {
+    WlanGetApArg* a = p;
+    a->result = (esp_wifi_sta_get_ap_info(a->out) == ESP_OK);
+}
+
+bool wlan_hal_get_connected_ap(wifi_ap_record_t* out) {
+    if(!s_started || !s_wifi_connected || !out) return false;
+    WlanGetApArg arg = {.out = out, .result = false};
+    if(!wlan_hal_run_in_worker(wlan_get_ap_worker, &arg)) return false;
+    return arg.result;
+}
+
+bool wlan_hal_last_fail_is_auth(void) {
+    return s_auth_fail_latched;
+}
+
+uint32_t wlan_hal_get_own_ip(void) {
+    return s_own_ip;
+}
+
+uint32_t wlan_hal_get_netmask(void) {
+    return s_own_netmask;
+}
+
+bool wlan_hal_get_own_mac(uint8_t out[6]) {
+    if(!s_started) return false;
+    return esp_wifi_get_mac(WIFI_IF_STA, out) == ESP_OK;
+}
+
+uint32_t wlan_hal_get_gw_ip(void) {
+    if(!s_netif_sta) return 0;
+    esp_netif_ip_info_t info;
+    if(esp_netif_get_ip_info(s_netif_sta, &info) != ESP_OK) return 0;
+    return info.gw.addr;
+}
+
+bool wlan_hal_send_eth_raw(const uint8_t* data, uint16_t len) {
+    if(!s_started || !s_cmd_queue) {
+        ESP_LOGW(TAG, "send_eth_raw: not started (s=%d q=%p)", s_started, s_cmd_queue);
+        return false;
+    }
+    if(!data || len < 14 || len > 1600) return false;
+    uint8_t* buf = malloc(len);
+    if(!buf) {
+        ESP_LOGE(TAG, "send_eth_raw: malloc(%u) failed", (unsigned)len);
+        return false;
+    }
+    memcpy(buf, data, len);
+    WlanCmd cmd = {.type = WCMD_SEND_ETH_RAW, .done = NULL, .result = NULL};
+    cmd.send_eth.buf = buf;
+    cmd.send_eth.len = len;
+    if(xQueueSend(s_cmd_queue, &cmd, 0) != pdTRUE) {
+        static uint32_t qfull_count = 0;
+        static uint32_t qfull_last_log = 0;
+        qfull_count++;
+        if(qfull_count - qfull_last_log >= 20) {
+            qfull_last_log = qfull_count;
+            ESP_LOGW(TAG, "send_eth_raw: cmd queue full (count=%lu)",
+                (unsigned long)qfull_count);
+        }
+        free(buf);
+        return false;
+    }
+    return true;
+}
+
+void wlan_hal_set_channel(uint8_t channel) {
+    if(s_channel_locked) {
+        ESP_LOGW(TAG, "set_channel(%u) BLOCKED", channel);
+        return;
+    }
+    if(!s_started || channel < 1 || channel > 14) return;
+    WlanCmd cmd = {.type = WCMD_SET_CHANNEL, .set_channel = {.channel = channel}};
+    wlan_send_cmd_sync(&cmd);
+}
+
+void wlan_hal_set_promiscuous(bool enable, wifi_promiscuous_cb_t cb) {
+    if(!s_started) return;
+    WlanCmd cmd = {.type = WCMD_SET_PROMISC, .set_promisc = {.enable = enable, .cb = cb}};
+    wlan_send_cmd_sync(&cmd);
+}
+
+bool wlan_hal_send_raw(const uint8_t* data, uint16_t len) {
+    if(!s_started || !s_cmd_queue || len > 64) return false;
+    WlanCmd cmd = {.type = WCMD_SEND_RAW, .done = NULL, .result = NULL};
+    memcpy(cmd.send_raw.buf, data, len);
+    cmd.send_raw.len = len;
+    return xQueueSend(s_cmd_queue, &cmd, 0) == pdTRUE;
+}
+
+bool wlan_hal_raw_tx_retry(const uint8_t* data, uint16_t len) {
+    if(survey_active()) return false;
+    // Direkter TX aus dem aufrufenden Task (NICHT über den Worker-Queue-
+    // Roundtrip wie wlan_hal_send_raw) — für High-Rate-Deauth-Bursts. Bei
+    // vollem TX-Ring (ESP_ERR_NO_MEM) kurz warten und erneut versuchen, sonst
+    // gehen im Burst still Frames verloren. en_sys_seq=true → HW füllt die Seq.
+    esp_err_t err = esp_wifi_80211_tx(WIFI_IF_STA, data, len, true);
+    for(int i = 0; err == ESP_ERR_NO_MEM && i < 3; i++) {
+        vTaskDelay(1); // TX-Ring drainen lassen
+        err = esp_wifi_80211_tx(WIFI_IF_STA, data, len, true);
+    }
+    return err == ESP_OK;
+}
+
+bool wlan_hal_run_in_worker(WlanHalWorkerFn fn, void* arg) {
+    if(!fn || survey_active()) return false;
+    // Lazy-init the worker queue + task. Evil Portal is entered directly from
+    // the menu without going through wlan_hal_start (no STA scan), so the
+    // worker may not exist yet. Safe to call repeatedly; no-ops if already up.
+    if(!wlan_ensure_worker()) return false;
+    volatile bool result = false;
+    WlanCmd cmd = {.type = WCMD_RUN_FN, .run_fn = {.fn = fn, .arg = arg}, .result = &result};
+    wlan_send_cmd_sync(&cmd);
+    return result;
+}
+
+void wlan_hal_scan_cancellable(
+    wifi_ap_record_t** out_records,
+    uint16_t* out_count,
+    uint16_t max_count,
+    const volatile bool* cancel) {
+    if(!out_records || !out_count) return;
+    *out_records = NULL;
+    *out_count = 0;
+    if(!s_started) return;
+    if(cancel && *cancel) return;
+
+    furi_hal_power_light_sleep_inhibit_enter();
+    NotificationApp* notification = furi_record_open(RECORD_NOTIFICATION);
+    notification_message(notification, &sequence_wifi_scan);
+    furi_record_close(RECORD_NOTIFICATION);
+    wifi_scan_config_t scan_config = {
+        .ssid = NULL, .bssid = NULL, .channel = 0,
+        .show_hidden = true, .scan_type = WIFI_SCAN_TYPE_ACTIVE,
+        .scan_time = {.active = {.min = 80, .max = 120}},
+    };
+    WlanCmd cmd = {
+        .type = WCMD_SCAN,
+        .scan = {
+            .config = &scan_config,
+            .out_records = out_records,
+            .out_count = out_count,
+            .max_count = max_count,
+        },
+    };
+    wlan_send_cmd_sync(&cmd);
+    notification = furi_record_open(RECORD_NOTIFICATION);
+    notification_message(notification, &sequence_wifi_scan);
+    furi_record_close(RECORD_NOTIFICATION);
+    furi_hal_power_light_sleep_inhibit_exit();
+    if(cancel && *cancel && out_records && *out_records) {
+        free(*out_records);
+        *out_records = NULL;
+        *out_count = 0;
+    }
+}
+
+void wlan_hal_scan(wifi_ap_record_t** out_records, uint16_t* out_count, uint16_t max_count) {
+    wlan_hal_scan_cancellable(out_records, out_count, max_count, NULL);
+}
+
+bool wlan_hal_raw_tx_direct(const uint8_t* data, uint16_t len) {
+    if(survey_active()) return false;
+    if(!s_started || !data || len > 256) return false;
+    esp_err_t err = esp_wifi_80211_tx(WIFI_IF_STA, data, len, true);
+    if(err == ESP_OK) return true;
+    if(err == ESP_ERR_NO_MEM) {
+        for(int i = 0; i < 4; i++) {
+            taskYIELD();
+            err = esp_wifi_80211_tx(WIFI_IF_STA, data, len, true);
+            if(err == ESP_OK) return true;
+        }
+    }
+    return false;
+}
+
+void wlan_hal_channel_lock(void) {
+    s_channel_locked = true;
+    ESP_LOGI(TAG, "Channel LOCKED");
+}
+
+void wlan_hal_channel_unlock(void) {
+    s_channel_locked = false;
+    ESP_LOGI(TAG, "Channel UNLOCKED");
+}
+
+bool wlan_hal_channel_is_locked(void) {
+    return s_channel_locked;
+}
+
+void wlan_hal_set_promiscuous_filter(uint32_t filter_mask) {
+    if(!s_started) return;
+    wifi_promiscuous_filter_t filter = {.filter_mask = filter_mask};
+    esp_wifi_set_promiscuous_filter(&filter);
+}
+
+void wlan_hal_set_max_tx_power(int8_t power) {
+    if(!s_started) return;
+    esp_wifi_set_max_tx_power(power);
+}
+
+
+// ---------------------------------------------------------------------------
+// Beacon-Spam: dedizierter xTaskCreate-Task (parallel zum Worker), nutzt
+// esp_wifi_80211_tx() direkt. Frame-Counter + Stop-Flag sind volatile.
+// ---------------------------------------------------------------------------
+
+static const uint8_t beacon_packet_template[] = {
+    0x80, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x83, 0x51, 0xf7, 0x8f, 0x0f, 0x00,
+    0x00, 0x00, 0xe8, 0x03, 0x31, 0x00, 0x00, 0x20, 0x20, 0x20,
+    0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+    0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+    0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x01, 0x08,
+    0x82, 0x84, 0x8b, 0x96, 0x24, 0x30, 0x48, 0x6c, 0x03, 0x01,
+    0x01, 0x30, 0x18, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x02, 0x02,
+    0x00, 0x00, 0x0f, 0xac, 0x04, 0x00, 0x0f, 0xac, 0x04, 0x01,
+    0x00, 0x00, 0x0f, 0xac, 0x02, 0x00, 0x00,
+};
+
+static const char* beacon_funny_ssids[] = {
+    "Mom Use This One", "Abraham Linksys", "Benjamin FrankLAN",
+    "Martin Router King", "John Wilkes Bluetooth", "Pretty Fly for a Wi-Fi",
+    "Bill Wi the Science Fi", "I Believe Wi Can Fi", "Tell My Wi-Fi Love Her",
+    "No More Mister Wi-Fi", "LAN Solo", "The LAN Before Time",
+    "Silence of the LANs", "House LANister", "Winternet Is Coming",
+    "FBI Surveillance Van 4", "Area 51 Test Site", "Never Gonna Give You Up",
+    "Loading...", "VIRUS.EXE", "Free Public Wi-Fi", "404 Wi-Fi Unavailable",
+    NULL,
+};
+
+static const char* beacon_rickroll_ssids[] = {
+    "01 Never gonna give you up",
+    "02 Never gonna let you down",
+    "03 Never gonna run around",
+    "04 And desert you",
+    "05 Never gonna make you cry",
+    "06 Never gonna say goodbye",
+    "07 Never gonna tell a lie",
+    "08 And hurt you",
+    NULL,
+};
+
+static volatile bool s_beacon_active = false;
+static volatile uint32_t s_beacon_frames = 0;
+static TaskHandle_t s_beacon_task = NULL;
+static WlanHalBeaconMode s_beacon_mode = WlanHalBeaconModeFunny;
+static char s_beacon_base_ssid[33] = {0};
+
+static void prepare_beacon_packet(uint8_t* packet, const uint8_t* mac,
+                                  const char* ssid, uint8_t channel) {
+    memcpy(packet, beacon_packet_template, sizeof(beacon_packet_template));
+    memcpy(&packet[10], mac, 6);
+    memcpy(&packet[16], mac, 6);
+    uint8_t ssid_len = (uint8_t)strlen(ssid);
+    if(ssid_len > 32) ssid_len = 32;
+    packet[37] = ssid_len;
+    memcpy(&packet[38], ssid, ssid_len);
+    packet[82] = channel;
+}
+
+static void beacon_spam_task(void* param) {
+    (void)param;
+    const char** ssid_list = NULL;
+    char gen_ssid[64];
+    uint8_t mac[6];
+    uint8_t packet[sizeof(beacon_packet_template)];
+    int ssid_index = 0;
+    int counter = 1;
+    uint8_t channel = 1;
+
+    srand((unsigned)esp_log_timestamp());
+
+    // Promiscuous (cb=NULL) erlaubt 80211_tx auf STA-Interface.
+    esp_wifi_set_promiscuous(true);
+
+    while(s_beacon_active) {
+        const char* current_ssid = NULL;
+        switch(s_beacon_mode) {
+        case WlanHalBeaconModeFunny:
+            ssid_list = beacon_funny_ssids;
+            current_ssid = ssid_list[ssid_index++];
+            if(ssid_list[ssid_index] == NULL) ssid_index = 0;
+            break;
+        case WlanHalBeaconModeRickroll:
+            ssid_list = beacon_rickroll_ssids;
+            current_ssid = ssid_list[ssid_index++];
+            if(ssid_list[ssid_index] == NULL) ssid_index = 0;
+            break;
+        case WlanHalBeaconModeRandom:
+            snprintf(gen_ssid, sizeof(gen_ssid), "SSID_%d", rand() % 9999);
+            current_ssid = gen_ssid;
+            break;
+        case WlanHalBeaconModeCustom:
+            if(s_beacon_base_ssid[0]) {
+                snprintf(gen_ssid, sizeof(gen_ssid), "%s%d",
+                    s_beacon_base_ssid, counter++);
+                if(counter > 9999) counter = 1;
+            } else {
+                snprintf(gen_ssid, sizeof(gen_ssid), "SSID_%d", rand() % 9999);
+            }
+            current_ssid = gen_ssid;
+            break;
+        }
+        if(!current_ssid) current_ssid = "Flipper";
+
+        // Random Locally-Administered Unicast MAC.
+        for(int i = 0; i < 6; i++) mac[i] = rand() & 0xFF;
+        mac[0] = (mac[0] & 0xFE) | 0x02;
+
+        prepare_beacon_packet(packet, mac, current_ssid, channel);
+        if(esp_wifi_80211_tx(WIFI_IF_STA, packet,
+               sizeof(beacon_packet_template), false) == ESP_OK) {
+            s_beacon_frames++;
+        }
+
+        if((s_beacon_frames % 5) == 0) {
+            channel++;
+            if(channel > 11) channel = 1;
+            esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    esp_wifi_set_promiscuous(false);
+    s_beacon_task = NULL;
+    vTaskDelete(NULL);
+}
+
+void wlan_hal_beacon_spam_start(WlanHalBeaconMode mode, const char* base_ssid) {
+    if(survey_active()) return;
+    if(s_beacon_active || s_beacon_task) return;
+    if(!s_started) {
+        if(!wlan_hal_start()) return;
+    }
+    if(s_wifi_connected) wlan_hal_disconnect();
+
+    s_beacon_mode = mode;
+    memset(s_beacon_base_ssid, 0, sizeof(s_beacon_base_ssid));
+    if(mode == WlanHalBeaconModeCustom && base_ssid) {
+        strncpy(s_beacon_base_ssid, base_ssid, sizeof(s_beacon_base_ssid) - 1);
+    }
+    s_beacon_frames = 0;
+    s_beacon_active = true;
+    BaseType_t rc = xTaskCreate(beacon_spam_task, "BeaconSpam",
+        4096, NULL, 5, &s_beacon_task);
+    if(rc != pdPASS) {
+        s_beacon_active = false;
+        s_beacon_task = NULL;
+        ESP_LOGE(TAG, "beacon_spam: xTaskCreate failed");
+    }
+}
+
+void wlan_hal_beacon_spam_stop(void) {
+    if(!s_beacon_active && !s_beacon_task) return;
+    s_beacon_active = false;
+    // Task beendet sich selbst (vTaskDelete im Task). Auf Beendigung warten.
+    while(s_beacon_task) vTaskDelay(pdMS_TO_TICKS(10));
+}
+
+bool wlan_hal_beacon_spam_is_running(void) {
+    return s_beacon_active;
+}
+
+uint32_t wlan_hal_beacon_spam_get_frame_count(void) {
+    return s_beacon_frames;
+}
