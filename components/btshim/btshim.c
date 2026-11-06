@@ -465,3 +465,30 @@ static bool bt_on_gap_event_callback(GapEvent event, void* context) {
         BT_LOG_W("Pairing stalled event received; queueing user guidance");
         BtMessage message = {.type = BtMessageTypePairingStalled};
         if(furi_message_queue_put(bt->message_queue, &message, 0) != FuriStatusOk) {
+            BT_LOG_E("Pairing-stalled UI event dropped: BT message queue full");
+            return false;
+        }
+        ret = true;
+    } else if(event.type == GapEventTypePairingDone) {
+        BT_LOG_I("Pairing completion event received; queueing passkey hide");
+        bt->pin = 0;
+        BtMessage message = {.type = BtMessageTypePairingDone};
+        if(furi_message_queue_put(bt->message_queue, &message, 0) != FuriStatusOk) {
+            BT_LOG_E("Pairing completion UI event dropped: BT message queue full");
+            return false;
+        }
+        ret = true;
+    } else if(event.type == GapEventTypeUpdateMTU) {
+        bt->max_packet_size = event.data.max_packet_size;
+        ret = true;
+    } else if(event.type == GapEventTypeBeaconStart) {
+        bt->beacon_active = true;
+        do_update_status = true;
+        ret = true;
+    } else if(event.type == GapEventTypeBeaconStop) {
+        bt->beacon_active = false;
+        do_update_status = true;
+        ret = true;
+    }
+
+    if(do_update_status) {
