@@ -29,7 +29,7 @@ bool furi_hal_usb_composite_install(
 bool furi_hal_usb_composite_is_installed(void);
 
 /**
- * Tear down the Composite and route the internal USB FS HS PHY back to the
+ * Tear down the Composite and route the internal USB FSLS PHY back to the
  * USB-Serial-JTAG controller, restoring the flash/console port live (no
  * reboot). ESP32-S3/S2 only; returns false on boards without USB-OTG.
  *
@@ -46,7 +46,7 @@ bool furi_hal_usb_composite_is_installed(void);
 bool furi_hal_usb_composite_uninstall(void);
 
 /**
- * Route the shared internal USB FS HS PHY back to the USB-Serial-JTAG
+ * Route the shared internal USB FSLS PHY back to the USB-Serial-JTAG
  * controller and re-enable its pads, WITHOUT touching the (possibly still
  * installed) TinyUSB OTG stack. This is the low-level half of uninstall().
  *
