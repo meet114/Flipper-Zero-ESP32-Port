@@ -1,10 +1,10 @@
 App(
     appid="nrf24",
-    name="NRF 2.4GHz",
-    apptype=FlipperAppType.MENUEXTERNAL,
+    name="nRF24",
+    apptype=FlipperAppType.APP,
     entry_point="nrf24_app",
     stack_size=4 * 1024,
     icon="A_Sub1ghz_14",
-    order=66,
+    order=2,
     fap_libs=["assets"],
 )
