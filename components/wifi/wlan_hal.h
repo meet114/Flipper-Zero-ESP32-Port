@@ -15,7 +15,7 @@ void wlan_hal_stop(void);
 /** Steuert, ob wlan_hal_stop() den BT-Stack wiederherstellt. wlan_hal_start()
  *  setzt dieses Flag automatisch auf true, wenn es BT beim Start abgeschaltet
  *  hat (transiente WiFi-Nutzung → BT kommt beim Stop zurück). Der WiFi-Service
- *  löscht es (false), sobald WiFi global/“sticky" wird (Lock-Menü „Enable WiFi"
+ *  löscht es (false), sobald WiFi global/“sticky” wird (Lock-Menü „Enable WiFi"
  *  oder erfolgreicher STA-Connect), damit BT dann bewusst aus bleibt. */
 void wlan_hal_set_bt_restore(bool restore);
 
