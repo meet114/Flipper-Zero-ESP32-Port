@@ -415,3 +415,34 @@ static void bt_close_rpc_connection(Bt* bt) {
             bt->rx_thread = NULL;
         }
         rpc_session_close(bt->rpc_session);
+        ble_profile_serial_set_event_callback(bt->current_profile, 0, NULL, NULL);
+        bt->rpc_session = NULL;
+    }
+}
+
+/* ---- GAP event callback (called from furi_hal_bt bridge) ---- */
+
+static bool bt_on_gap_event_callback(GapEvent event, void* context) {
+    furi_assert(context);
+    Bt* bt = context;
+    bool ret = false;
+    bool do_update_status = false;
+
+    if(event.type == GapEventTypeConnected) {
+        bt->pin = 0;
+        bt->pairing_stalled = false;
+        bt->status = BtStatusConnected;
+        do_update_status = true;
+        bt_open_rpc_connection(bt);
+        ret = true;
+    } else if(event.type == GapEventTypeDisconnected) {
+        bt->pin = 0;
+        bt->pairing_stalled = false;
+        bt_close_rpc_connection(bt);
+        bt->status = BtStatusOff;
+        do_update_status = true;
+        ret = true;
+    } else if(event.type == GapEventTypeStartAdvertising) {
+        bt->status = BtStatusAdvertising;
+        do_update_status = true;
+        ret = true;
