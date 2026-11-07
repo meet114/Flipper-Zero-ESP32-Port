@@ -26,6 +26,8 @@ typedef enum {
     DesktopLockedEventUpdate,
     DesktopLockedEventShowPinInput,
     DesktopLockedEventDoorsClosed,
+    DesktopLockedEventCoversClosed,
+    DesktopLockedEventOpenPowerOff,
 
     DesktopPinInputEventResetWrongPinLabel,
     DesktopPinInputEventUnlocked,
@@ -90,9 +92,11 @@ typedef enum {
     /* Host hat die qFlipper-Verbindung beendet (Auto-off der Bridge): Bridge
      * stoppen + Composite abbauen → zurueck zu USB-Serial-JTAG. */
     DesktopGlobalQflipperStop,
+    DesktopGlobalSystemTaskFinished,
 
     DesktopAnimationEventCheckAnimation,
     DesktopAnimationEventNewIdleAnimation,
+    DesktopAnimationEventNewExternalAnimation,
     DesktopAnimationEventInteractAnimation,
 
     DesktopSlideshowCompleted,
@@ -109,4 +113,7 @@ typedef enum {
     DesktopGlobalApiUnlock,
     DesktopGlobalSaveSettings,
     DesktopGlobalReloadSettings,
+    DesktopGlobalReloadAnimation,
+    DesktopGlobalIdleEnter,
+    DesktopGlobalIdleExit,
 } DesktopEvent;
