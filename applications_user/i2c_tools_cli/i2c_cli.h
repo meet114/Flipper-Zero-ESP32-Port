@@ -1,5 +1,4 @@
 #pragma once
 
-#include <furi.h>
-
-void i2c_cli_init(void);
+void i2c_cli_register(void);
+void i2c_cli_unregister(void);
