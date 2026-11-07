@@ -23,7 +23,7 @@ void wifi_marauder_script_stage_menu_free(WifiMarauderScriptStageMenu* stage_men
     for(uint32_t i = 0; i < stage_menu->num_items; i++) {
         WifiMarauderScriptMenuItem* item = &(stage_menu->items[i]);
         for(int j = 0; j < item->num_options; j++) {
-            free(item->name);
+            free(item->options[j]);
         }
         free(item->name);
     }
