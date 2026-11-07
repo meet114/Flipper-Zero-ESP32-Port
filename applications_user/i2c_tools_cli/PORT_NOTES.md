@@ -17,7 +17,7 @@ the firmware. Build with `buildFap.sh applications_user/i2c_tools_cli`, copy the
 | Input | acts on `InputTypeRelease`, uses Long OK / Long Back | Acts on `InputTypeShort`; `i2c_input.h` also turns an OK/Back hold into `InputTypeLong` on boards with `BOARD_INPUT_SHORT_AFTER_RELEASE` (Paradoxt does not emit Long for OK/Back). |
 | CLI output | `printf` / `putchar` | `pipe_send()` on the shell pipe. Nothing in this firmware binds libc stdout to the per-thread furi stdout callback (`furi_thread_stdout_write` is not even linked into the ELF), so `printf` text never reached the terminal. |
 | CLI unload | none | `i2c_cli_unregister()` waits (max 5 s) for a command that is still running, because the shell runs commands on their own thread and does not wait for them; unloading the FAP under one would jump into freed memory. |
-| CLI numbers | hex | unchanged: every number is hex (`i2c write 3c 0 10` reads 16 bytes). |
+| CLI numbers | hex | unchanged: every number is hex (`i2c read 3c 0 10` reads 16 bytes). |
 
 ### Upstream bugs fixed on the way
 
