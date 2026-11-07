@@ -95,6 +95,9 @@ void animation_manager_set_new_idle_callback(
  */
 void animation_manager_new_idle_process(AnimationManager* animation_manager);
 
+/** Select another SD-card animation without changing internal animation selection. */
+bool animation_manager_new_external_process(AnimationManager* animation_manager);
+
 /**
  * Set callback for Animation Manager for deferred calls
  * for animation_manager_check_blocking_process().
@@ -150,6 +153,10 @@ bool animation_manager_is_animation_loaded(AnimationManager* animation_manager);
  * @animation_manager   instance
  */
 void animation_manager_unload_and_stall_animation(AnimationManager* animation_manager);
+
+/** Pause/resume frame and rotation timers while the device is idle (screen off,
+ * light sleep). Animation state is untouched, so it is safe in every state. */
+void animation_manager_set_paused(AnimationManager* animation_manager, bool paused);
 
 /**
  * Load and Continue execution of animation manager.
