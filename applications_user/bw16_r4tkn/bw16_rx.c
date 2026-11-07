@@ -102,7 +102,7 @@ void bw16_rx_handle_data(uint8_t* buf, size_t len, void* context) {
     furi_string_cat_printf(app->text_box_store, "%s", buf);
     app->console_dirty = true;
 
-    /* 2) Reassemble complete lines and parse them for list/marker handling. */
+    /* 2) Re-assemble complete lines and parse them for list/marker handling. */
     for(size_t i = 0; i < len; i++) {
         char c = (char)buf[i];
         if(c == '\n') {
